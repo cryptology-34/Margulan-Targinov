@@ -1,0 +1,131 @@
+from typing import List
+SBOX = [
+    0xE, 0x4, 0xD, 0x1,
+    0x2, 0xF, 0xB, 0x8,
+    0x3, 0xA, 0x6, 0xC,
+    0x5, 0x9, 0x0, 0x7
+]
+INV_SBOX = [SBOX.index(x) for x in range(16)]
+# p[i] = позиция, на которую переходит бит i (i от 0..15, 0 - младший бит)
+PBOX = [
+     0,  4,  8, 12,
+     1,  5,  9, 13,
+     2,  6, 10, 14,
+     3,  7, 11, 15
+]
+# inverse permutation
+INV_PBOX = [0]*16
+for i, p in enumerate(PBOX):
+    INV_PBOX[p] = i
+
+# ---------- утилиты ----------
+def rotl(val: int, r: int, bits: int) -> int:
+    return ((val << r) & ((1 << bits) - 1)) | (val >> (bits - r))
+
+def apply_sbox(word16: int, sbox: List[int]) -> int:
+    out = 0
+    for i in range(4):  # 4 ниббла в 16-битном слове
+        nib = (word16 >> (4*i)) & 0xF
+        out |= (sbox[nib] & 0xF) << (4*i)
+    return out
+
+def apply_pbox(word16: int, pbox: List[int]) -> int:
+    out = 0
+    for i in range(16):
+        bit = (word16 >> i) & 1
+        if bit:
+            out |= 1 << pbox[i]
+    return out
+
+# ---------- ключевая схема ----------
+def key_schedule(master_key: int, rounds: int = 4) -> List[int]:
+    """
+    Простая схема: master_key — 32-бита. Для каждого раунда берем верхние 16 бит,
+    затем вращаем master_key влево на 4 бита. Возвращает список из rounds+1 раунд-ключей.
+    """
+    if master_key.bit_length() > 32:
+        raise ValueError("master_key должен быть <= 32 бит")
+    keys = []
+    key = master_key & 0xFFFFFFFF
+    for _ in range(rounds + 1):
+        rk = (key >> 16) & 0xFFFF
+        keys.append(rk)
+        key = rotl(key, 4, 32)
+    return keys
+
+# ---------- шифрование одной 16-битной блока ----------
+def encrypt_block(plain16: int, round_keys: List[int]) -> int:
+    state = plain16 & 0xFFFF
+    rounds = len(round_keys) - 1
+    for r in range(rounds):
+        state ^= round_keys[r]           # addRoundKey
+        state = apply_sbox(state, SBOX)  # substitution
+        state = apply_pbox(state, PBOX)  # permutation
+    # последний раунд: addRoundKey + S-box + addRoundKey (как в классических SPN вариантах можно менять)
+    state ^= round_keys[rounds - 0]
+    state = apply_sbox(state, SBOX)
+    state ^= round_keys[rounds]
+    return state & 0xFFFF
+
+# ---------- дешифрование одной 16-битной блока ----------
+def decrypt_block(cipher16: int, round_keys: List[int]) -> int:
+    state = cipher16 & 0xFFFF
+    rounds = len(round_keys) - 1
+    # обратный финальный шаг
+    state ^= round_keys[rounds]
+    state = apply_sbox(state, INV_SBOX)
+    state ^= round_keys[rounds - 0]
+    # обратные раунды
+    for r in range(rounds - 1, -1, -1):
+        state = apply_pbox(state, INV_PBOX)
+        state = apply_sbox(state, INV_SBOX)
+        state ^= round_keys[r]
+    return state & 0xFFFF
+
+# ---------- блочная обработка (PKCS#7 padding для краткости) ----------
+def pad(data: bytes, block_size: int = 2) -> bytes:
+    pad_len = block_size - (len(data) % block_size)
+    return data + bytes([pad_len] * pad_len)
+
+def unpad(data: bytes) -> bytes:
+    if not data:
+        return data
+    pad_len = data[-1]
+    if pad_len < 1 or pad_len > 2:
+        raise ValueError("Invalid padding")
+    return data[:-pad_len]
+
+def encrypt_bytes(plaintext: bytes, master_key: int) -> bytes:
+    keys = key_schedule(master_key)
+    pt = pad(plaintext, 2)
+    out = bytearray()
+    for i in range(0, len(pt), 2):
+        block = (pt[i] << 8) | pt[i+1]  # big-endian 16-bit
+        ct = encrypt_block(block, keys)
+        out.extend(bytes([(ct >> 8) & 0xFF, ct & 0xFF]))
+    return bytes(out)
+
+def decrypt_bytes(ciphertext: bytes, master_key: int) -> bytes:
+    keys = key_schedule(master_key)
+    if len(ciphertext) % 2 != 0:
+        raise ValueError("ciphertext length must be multiple of 2")
+    out = bytearray()
+    for i in range(0, len(ciphertext), 2):
+        block = (ciphertext[i] << 8) | ciphertext[i+1]
+        pt = decrypt_block(block, keys)
+        out.extend(bytes([(pt >> 8) & 0xFF, pt & 0xFF]))
+    return unpad(bytes(out))
+
+# ---------- пример использования ----------
+if __name__ == "__main__":
+    master = 0x3A94D63F  # 32-битный мастер-ключ (пример)
+    print("Master key: 0x%08X" % master)
+    keys = key_schedule(master)
+    print("Round keys:", [f"0x{k:04X}" for k in keys])
+
+    text = b"Hi"  # 2 байта -> ровно один блок
+    ct = encrypt_bytes(text, master)
+    pt = decrypt_bytes(ct, master)
+    print("Plain :", text)
+    print("Cipher:", ct.hex())
+    print("Decrypt:", pt)
