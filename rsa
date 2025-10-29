@@ -1,0 +1,118 @@
+import os
+import random
+from typing import Tuple
+
+# --------- утилиты для простых чисел (Miller-Rabin) ----------
+def is_probable_prime(n: int, k: int = 8) -> bool:
+    """Miller-Rabin probabilistic primality test."""
+    if n < 2:
+        return False
+    small_primes = (2,3,5,7,11,13,17,19,23,29)
+    for p in small_primes:
+        if n % p == 0:
+            return n == p
+    # write n-1 as d*2^s
+    s = 0
+    d = n - 1
+    while d % 2 == 0:
+        d //= 2
+        s += 1
+    for _ in range(k):
+        a = random.randrange(2, n - 1)
+        x = pow(a, d, n)
+        if x == 1 or x == n - 1:
+            continue
+        for _ in range(s - 1):
+            x = pow(x, 2, n)
+            if x == n - 1:
+                break
+        else:
+            return False
+    return True
+
+def generate_prime(bits: int) -> int:
+    """Генерируем простое число заданной битовой длины."""
+    assert bits >= 8
+    while True:
+        candidate = random.getrandbits(bits) | (1 << (bits - 1)) | 1
+        if is_probable_prime(candidate):
+            return candidate
+
+# --------- RSA keygen ----------
+def egcd(a: int, b: int) -> Tuple[int,int,int]:
+    if b == 0:
+        return a, 1, 0
+    g, x1, y1 = egcd(b, a % b)
+    return g, y1, x1 - (a // b) * y1
+
+def modinv(a: int, m: int) -> int:
+    g, x, _ = egcd(a, m)
+    if g != 1:
+        raise ValueError("Обратного числа не существует")
+    return x % m
+
+def generate_rsa_keypair(bits: int = 1024) -> Tuple[Tuple[int,int], Tuple[int,int]]:
+    """Возвращает ((e, n), (d, n)) — публичный и приватный ключи."""
+    # Генерируем p и q
+    p = generate_prime(bits // 2)
+    q = generate_prime(bits // 2)
+    while q == p:
+        q = generate_prime(bits // 2)
+    n = p * q
+    phi = (p - 1) * (q - 1)
+    # удобный публичный экспонент
+    e = 65537
+    if phi % e == 0:
+        # если не подходит — выберем другое e
+        e = 3
+        while egcd(e, phi)[0] != 1:
+            e += 2
+    d = modinv(e, phi)
+    return (e, n), (d, n)
+
+# --------- простая (небезопасная) хеш-функция ----------
+def simple_hash(message: bytes, mod: int) -> int:
+    """
+    Простейший полиномиальный rolling hash: sum((b + 1) * base^i) mod mod.
+    base небольшой простое число.
+    ВНИМАНИЕ: эта функция НЕ криптографическая.
+    """
+    base = 257
+    h = 0
+    for b in message:
+        h = (h * base + (b + 1)) % mod
+    return h
+
+# --------- подпись и проверка ----------
+def sign(message: bytes, private_key: Tuple[int,int]) -> int:
+    d, n = private_key
+    h = simple_hash(message, n)
+    signature = pow(h, d, n)
+    return signature
+
+def verify(message: bytes, signature: int, public_key: Tuple[int,int]) -> bool:
+    e, n = public_key
+    h = simple_hash(message, n)
+    recovered = pow(signature, e, n)
+    return recovered == h
+
+# --------- пример использования ----------
+if __name__ == "__main__":
+    # Сгенерируем небольшой ключ (для скорости в демо можно взять 512 бит,
+    # но для реального использования нужно минимум 2048)
+    print("Генерация ключей... (может занять время)")
+    public, private = generate_rsa_keypair(bits=512)  # для демо 512 бит
+    print("Public (e,n):", public)
+    print("Private (d,n):", "(скрыто в реальных условиях)")
+
+    msg_text = "Hello, это тестовая подпись!"
+    msg = msg_text.encode("utf-8")
+    sig = sign(msg, private)
+    print("Подпись (число):", sig)
+
+    ok = verify(msg, sig, public)
+    print("Проверка подписи:", ok)
+
+    # Проверка на изменённом сообщении
+    tampered = "Hello, это тестовая подпись?" .encode("utf-8")
+    print("Проверка на изменённом сообщении:", verify(tampered, sig, public))
