@@ -1,0 +1,131 @@
+from typing import List, Tuple
+
+# ---------- простая 8-битная S-box (пример) ----------
+SBOX8 = [
+    0x63,0x7C,0x77,0x7B,0xF2,0x6B,0x6F,0xC5,
+    0x30,0x01,0x67,0x2B,0xFE,0xD7,0xAB,0x76,
+    # заполним до 256 значений простым расширением (демо)
+] + [i & 0xFF for i in range(16, 256)]
+SBOX8 = SBOX8[:256]
+
+# ---------- утилиты ----------
+def rotl(val: int, r: int, bits: int) -> int:
+    return ((val << r) & ((1 << bits) - 1)) | (val >> (bits - r))
+
+def pkcs7_pad(data: bytes, block_size: int) -> bytes:
+    pad_len = block_size - (len(data) % block_size)
+    return data + bytes([pad_len] * pad_len)
+
+def pkcs7_unpad(data: bytes) -> bytes:
+    if not data:
+        return data
+    pad_len = data[-1]
+    if pad_len < 1 or pad_len > len(data):
+        raise ValueError("Invalid padding")
+    if data[-pad_len:] != bytes([pad_len] * pad_len):
+        raise ValueError("Invalid padding bytes")
+    return data[:-pad_len]
+
+# ---------- ключевая схема ----------
+def key_schedule(master_key: int, rounds: int = 4) -> List[int]:
+    """
+    master_key: любой целый (например 32-бит). Возвращает список раунд-ключей (8-битных).
+    Простая схема: для каждого раунда берём верхние 8 бит и вращаем master_key.
+    """
+    if master_key < 0:
+        raise ValueError("master_key must be non-negative")
+    key = master_key & 0xFFFFFFFF
+    round_keys = []
+    for _ in range(rounds):
+        rk = (key >> 24) & 0xFF
+        round_keys.append(rk)
+        key = rotl(key, 8, 32)
+    return round_keys
+
+# ---------- функция F ----------
+def F(right8: int, round_key: int) -> int:
+    """
+    Простейшая F-функция:
+    - расширяем right8 до 16 бит: (right8 << 8) | right8
+    - XOR с раунд-ключом (расширенным)
+    - применяем S-box: разбиваем на два байта, заменяем через SBOX8
+    - возвращаем 8-битовый результат (например, XOR двух S-box-байт)
+    """
+    expanded = ((right8 << 8) | right8) & 0xFFFF
+    rk16 = (round_key << 8) | round_key
+    x = expanded ^ rk16
+    hi = (x >> 8) & 0xFF
+    lo = x & 0xFF
+    s_hi = SBOX8[hi]
+    s_lo = SBOX8[lo]
+    return (s_hi ^ s_lo) & 0xFF
+
+# ---------- шифрование/дешифрование одного блока (16-bit) ----------
+def encrypt_block(block16: int, round_keys: List[int]) -> int:
+    """
+    Блок: 16 бит. Представлен как целое 0..0xFFFF.
+    Feistel: L0, R0 — по 8 бит.
+    Для каждого раунда: L_{i+1} = R_i; R_{i+1} = L_i XOR F(R_i, K_i)
+    Возвращает 16-битный шифротекст.
+    """
+    L = (block16 >> 8) & 0xFF
+    R = block16 & 0xFF
+    for k in round_keys:
+        newL = R
+        newR = L ^ F(R, k)
+        L, R = newL, newR
+    return ((L << 8) | R) & 0xFFFF
+
+def decrypt_block(block16: int, round_keys: List[int]) -> int:
+    """
+    Для дешифрования проход раунд-ключей в обратном порядке
+    и обратная формула:
+    R_i = L_{i+1}
+    L_i = R_{i+1} XOR F(R_i, K_i)
+    """
+    L = (block16 >> 8) & 0xFF
+    R = block16 & 0xFF
+    for k in reversed(round_keys):
+        newR = L
+        newL = R ^ F(L, k)
+        L, R = newL, newR
+    return ((L << 8) | R) & 0xFFFF
+
+# ---------- шифрование байтов (ECB) ----------
+def encrypt_bytes_ecb(plaintext: bytes, master_key: int) -> bytes:
+    bs = 2  # блок 2 байта
+    data = pkcs7_pad(plaintext, bs)
+    keys = key_schedule(master_key)
+    out = bytearray()
+    for i in range(0, len(data), bs):
+        block = (data[i] << 8) | data[i+1]
+        ct = encrypt_block(block, keys)
+        out.append((ct >> 8) & 0xFF)
+        out.append(ct & 0xFF)
+    return bytes(out)
+
+def decrypt_bytes_ecb(ciphertext: bytes, master_key: int) -> bytes:
+    if len(ciphertext) % 2 != 0:
+        raise ValueError("ciphertext length must be multiple of 2")
+    keys = key_schedule(master_key)
+    out = bytearray()
+    for i in range(0, len(ciphertext), 2):
+        block = (ciphertext[i] << 8) | ciphertext[i+1]
+        pt = decrypt_block(block, keys)
+        out.append((pt >> 8) & 0xFF)
+        out.append(pt & 0xFF)
+    return pkcs7_unpad(bytes(out))
+
+# ---------- демонстрация ----------
+if __name__ == "__main__":
+    master = 0x3A94D63F  # пример мастер-ключ (32-bit)
+    print("Master key: 0x%08X" % master)
+    rk = key_schedule(master, rounds=4)
+    print("Round keys:", [f"0x{k:02X}" for k in rk])
+
+    msg = b"Hello!"  # длина 6 байт
+    print("Plain:", msg)
+    ct = encrypt_bytes_ecb(msg, master)
+    print("Cipher (hex):", ct.hex())
+    pt = decrypt_bytes_ecb(ct, master)
+    print("Decrypted:", pt)
